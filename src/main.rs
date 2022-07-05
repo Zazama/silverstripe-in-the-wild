@@ -76,7 +76,7 @@ async fn main() {
         let lines: Vec<String> = contents.lines().map(|x| String::from(x)).collect();
 
         let tasks = 3;
-        let lines_chunks: Arc<Vec<Vec<String>>> = Arc::new(lines.chunks((lines.len() / tasks).min(1)).map(|v| v.to_vec()).collect());
+        let lines_chunks: Arc<Vec<Vec<String>>> = Arc::new(lines.chunks((lines.len() / tasks).max(1)).map(|v| v.to_vec()).collect());
 
         let mut handles: Vec<JoinHandle<()>> = vec![];
 
