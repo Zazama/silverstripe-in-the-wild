@@ -205,7 +205,7 @@ async fn get_and_insert_wat_url(url: &Url) -> Option<()> {
             if meta.content.is_none() || meta.name.is_none() {
                 continue;
             }
-            if meta.name.unwrap().eq("generator") && meta.content.unwrap().eq("SilverStripe - http://silverstripe.org") {
+            if meta.name.unwrap().eq("generator") && meta.content.unwrap().to_lowercase().starts_with("silverstripe") {
                 let second_target = if target_domain.starts_with("www.") { target_domain.replace("www.", "") } else { "www.".to_owned() + &target_domain };
                 if db.prepare("SELECT * FROM urls WHERE url = ?1 OR url = ?2").unwrap().exists(params![target_domain, second_target]).unwrap() {
                     debug!("Url already in db: {}", target_domain);
