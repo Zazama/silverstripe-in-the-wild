@@ -6,12 +6,14 @@ use std::{thread, time};
 use std::io::BufReader;
 use std::ops::Add;
 use std::sync::Arc;
+use flate2::Compression;
 use url::Url;
 use log::{info, warn, debug, error};
 use reqwest::{Response, StatusCode};
 use rusqlite::{Connection, params};
 use futures_util::StreamExt;
-use flate2::read::MultiGzDecoder;
+use flate2::read::{MultiGzDecoder};
+use flate2::write::{GzDecoder, GzEncoder};
 use rust_warc::WarcReader;
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -40,7 +42,13 @@ struct SilverstripeVersion {
     hash: Option<String>
 }
 
+struct InstanceResponse {
+    url: String,
+    response: String
+}
+
 struct SilverstripeInstance {
+    responses: Vec<InstanceResponse>,
     version: SilverstripeVersion,
     server: Option<String>,
     powered_by: Option<String>,
@@ -171,9 +179,9 @@ async fn get_and_insert_wat_url(url: &Url) -> Option<()> {
 
     let read_file = File::open(&filepath).unwrap();
 
-    let warc_reader = WarcReader::new(BufReader::with_capacity(10000000, MultiGzDecoder::new(read_file)));
+    let warc_reader = WarcReader::new(BufReader::with_capacity(10000, MultiGzDecoder::new(read_file)));
 
-    for item in warc_reader {
+    'outer: for item in warc_reader {
         if item.is_err() {
             continue;
         }
@@ -202,7 +210,7 @@ async fn get_and_insert_wat_url(url: &Url) -> Option<()> {
                 if db.prepare("SELECT * FROM urls WHERE url = ?1 OR url = ?2").unwrap().exists(params![target_domain, second_target]).unwrap() {
                     debug!("Url already in db: {}", target_domain);
                     remove_file(Path::new(&filepath));
-                    return None;
+                    continue 'outer;
                 }
 
                 match db.execute("INSERT INTO urls (path_id, url) VALUES (?1, ?2)", params![path_id, target_domain]) {
@@ -285,6 +293,19 @@ async fn get_and_insert_instance_infos_from_urls(db: &Connection) {
                 info!("Instance info inserted: {}", &url_string);
             }
         }
+
+        for instance_response in instance.responses {
+            match db.execute("INSERT INTO responses (url, response) VALUES (?1, ?2)", params![
+                &instance_response.url,
+                gzip_encode_string(&instance_response.response)
+            ]) {
+                Err(_) => {
+                    warn!("Unable to insert response of url {}", &instance_response.url);
+                    continue;
+                },
+                Ok(_) => {}
+            }
+        }
     }
 }
 
@@ -298,12 +319,17 @@ async fn get_instance_info(url: &Url) -> Result<Option<SilverstripeInstance>, St
     let headers = response.headers().clone();
     let server_header = headers.get("server");
     let powered_by_header = headers.get("x-powered-by");
+    let mut responses: Vec<InstanceResponse> = vec![];
 
     let response_text = match response.text().await {
         Err(_) => return Err(String::from("Unable to get response")),
         Ok(text) => text
     };
 
+    responses.push(InstanceResponse {
+        url: String::from(url.as_str()),
+        response: response_text.clone()
+    });
     let document = Html::parse_document(&response_text);
 
     // Check generator tag
@@ -312,7 +338,7 @@ async fn get_instance_info(url: &Url) -> Result<Option<SilverstripeInstance>, St
             return Ok(None);
         },
         Some(ct) => {
-            if !ct.value().attr("content").unwrap_or_default().starts_with("SilverStripe - http") {
+            if !ct.value().attr("content").unwrap_or_default().to_lowercase().starts_with("silverstripe") {
                 return Ok(None);
             }
         }
@@ -332,6 +358,7 @@ async fn get_instance_info(url: &Url) -> Result<Option<SilverstripeInstance>, St
     let translatable = check_translatable(&url, silverstripe_version.major_version).await;
 
     Ok(Some(SilverstripeInstance {
+        responses,
         version: silverstripe_version,
         server: server_header.map_or(None, |h| Some(String::from(h.to_str().unwrap_or_default()))),
         powered_by: powered_by_header.map_or(None, |h| Some(String::from(h.to_str().unwrap_or_default()))),
@@ -340,6 +367,13 @@ async fn get_instance_info(url: &Url) -> Result<Option<SilverstripeInstance>, St
         fluent,
         translatable
     }))
+}
+
+fn gzip_encode_string(string: &str) -> String {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(string.as_bytes());
+
+    hex::encode(encoder.finish().unwrap_or(vec![]))
 }
 
 async fn check_translatable(url: &Url, major_version: u8) -> bool {
